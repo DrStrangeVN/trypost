@@ -1,0 +1,60 @@
+# TryPost — FORK override for DrStrangeVN/trypost.
+#
+# Layer this on top of the stock production stack; the stock file stays
+# untouched so upstream merges keep applying cleanly:
+#
+#   docker compose -f compose.prod.yaml -f compose.fork.yaml up -d
+#
+# What this changes vs compose.prod.yaml, and why:
+#
+#   1. The app image is BUILT from this fork's source instead of pulling
+#      ghcr.io/trypostit/trypost, so fork changes are what actually runs.
+#      Reverb client values are build args: set VITE_REVERB_HOST /
+#      VITE_REVERB_PORT / VITE_REVERB_SCHEME in the shell (or a .env file
+#      next to the compose files) to match the public domain, e.g.
+#        VITE_REVERB_HOST=trypost.example.com
+#        VITE_REVERB_PORT=443
+#        VITE_REVERB_SCHEME=https
+#      REVERB_APP_KEY at runtime must equal the build-time key; both read
+#      the same variable here so they cannot drift apart.
+#
+#   2. The "storage" volume mounts the WHOLE storage/ directory, not only
+#      storage/app. Stock mounts storage/app only, which leaves the
+#      Passport OAuth keys (storage/oauth-*.key), logs and framework files
+#      on the container's ephemeral layer: they vanish on recreate (hence
+#      the PASSPORT_*_KEY env workaround in the stock file) and any extra
+#      container started without the exact same mount sees a different,
+#      empty storage — uploads written by one process 404 for every other
+#      process and for the web server. One volume for all of storage/
+#      keeps php-fpm, Horizon, the scheduler and Reverb on the same files.
+#
+#   3. FILESYSTEM_DISK is re-pinned to "public". Every media read/write
+#      uses the default disk (HasMedia trait, Media::url()). The shipped
+#      .env examples set FILESYSTEM_DISK=local (the private disk rooted at
+#      storage/app/private): if that value ever wins, uploads land outside
+#      the web-served tree and every media URL 404s while the post itself
+#      looks fine — the exact failure this fork was created to prevent.
+#
+# NEVER split the app into extra containers (separate queue/web/worker)
+# without giving every one of them this same storage volume.
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+      args:
+        VITE_APP_NAME: ${VITE_APP_NAME:-TryPost}
+        VITE_REVERB_APP_KEY: ${REVERB_APP_KEY:-trypost-reverb-key}
+        VITE_REVERB_HOST: ${VITE_REVERB_HOST:-localhost}
+        VITE_REVERB_PORT: ${VITE_REVERB_PORT:-8080}
+        VITE_REVERB_SCHEME: ${VITE_REVERB_SCHEME:-http}
+    image: trypost-fork:latest
+    environment:
+      FILESYSTEM_DISK: public
+    volumes: !override
+      - storage:/var/www/html/storage
+
+volumes:
+  storage:

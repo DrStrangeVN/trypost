@@ -1,0 +1,141 @@
+# TryPost — FORK staging stack (DrStrangeVN/trypost).
+#
+# A second, fully isolated copy of the app on the same host, used to prove
+# a fork build before it ever touches production data:
+#
+#   cp .env.staging.example .env.staging   # fill in staging-only secrets
+#   docker compose --env-file .env.staging -f compose.staging.yaml up -d --build
+#
+# Isolation rules baked in below:
+#   - Separate Compose project ("trypost-staging") => separate volumes and
+#     network; staging CANNOT see production storage or the production DB.
+#   - Host ports are offset (18000/18080) so both stacks run side by side.
+#   - APP_URL is the staging subdomain. OAuth callbacks are derived from
+#     it, so the staging redirect URIs must be ADDED (not substituted) in
+#     the Meta app and the Google OAuth client:
+#       https://staging-trypost.danangdragons.com/accounts/facebook/callback
+#       https://staging-trypost.danangdragons.com/accounts/instagram-facebook/callback
+#       https://staging-trypost.danangdragons.com/accounts/instagram/callback
+#       https://staging-trypost.danangdragons.com/accounts/threads/callback
+#       https://staging-trypost.danangdragons.com/accounts/youtube/callback
+#   - The database starts EMPTY (or from a restored production dump made
+#     with docker/backup-trypost.sh in the ops package). Never point
+#     staging at the production database.
+#   - FILESYSTEM_DISK is pinned to "public" for the same reason as in
+#     compose.fork.yaml, and storage is one whole-directory volume.
+#   - Serve the staging subdomain with the host's existing reverse proxy
+#     (Caddy/Cloudflare) forwarding to 127.0.0.1:18000 and, for Reverb,
+#     127.0.0.1:18080. No caddy service is defined here on purpose.
+
+name: trypost-staging
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+      args:
+        VITE_APP_NAME: ${VITE_APP_NAME:-TryPost Staging}
+        VITE_REVERB_APP_KEY: ${REVERB_APP_KEY:?set REVERB_APP_KEY in .env.staging}
+        VITE_REVERB_HOST: ${STAGING_HOST:?set STAGING_HOST in .env.staging}
+        VITE_REVERB_PORT: "443"
+        VITE_REVERB_SCHEME: https
+    image: trypost-fork:staging
+    container_name: trypost-staging
+    restart: unless-stopped
+    environment:
+      APP_NAME: ${VITE_APP_NAME:-TryPost Staging}
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:?set APP_KEY in .env.staging}
+      APP_URL: https://${STAGING_HOST:?set STAGING_HOST in .env.staging}
+      SELF_HOSTED: "true"
+      TRYPOST_TARGET: production
+
+      DB_CONNECTION: pgsql
+      DB_HOST: pgsql
+      DB_PORT: "5432"
+      DB_DATABASE: trypost_staging
+      DB_USERNAME: trypost
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env.staging}
+
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      QUEUE_CONNECTION: redis
+      CACHE_STORE: redis
+      SESSION_DRIVER: database
+      BROADCAST_CONNECTION: reverb
+
+      REVERB_APP_ID: "1002"
+      REVERB_APP_KEY: ${REVERB_APP_KEY:?set REVERB_APP_KEY in .env.staging}
+      REVERB_APP_SECRET: ${REVERB_APP_SECRET:?set REVERB_APP_SECRET in .env.staging}
+      REVERB_HOST: localhost
+      REVERB_PORT: "8080"
+      REVERB_SCHEME: http
+
+      # Staging gets its OWN Passport keys (entrypoint generates them into
+      # the staging storage volume on first boot when these are blank).
+      PASSPORT_PRIVATE_KEY: ${PASSPORT_PRIVATE_KEY:-}
+      PASSPORT_PUBLIC_KEY: ${PASSPORT_PUBLIC_KEY:-}
+
+      FILESYSTEM_DISK: public
+
+      MAIL_MAILER: log
+      MAIL_FROM_ADDRESS: hello@example.com
+      MAIL_FROM_NAME: TryPost Staging
+
+      # Social platforms — same developer apps as production; the staging
+      # redirect URIs above must exist in each portal.
+      FACEBOOK_CLIENT_ID: ${FACEBOOK_CLIENT_ID:-}
+      FACEBOOK_CLIENT_SECRET: ${FACEBOOK_CLIENT_SECRET:-}
+      INSTAGRAM_CLIENT_ID: ${INSTAGRAM_CLIENT_ID:-}
+      INSTAGRAM_CLIENT_SECRET: ${INSTAGRAM_CLIENT_SECRET:-}
+      THREADS_CLIENT_ID: ${THREADS_CLIENT_ID:-}
+      THREADS_CLIENT_SECRET: ${THREADS_CLIENT_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+    ports:
+      - "18000:80"
+      - "18080:8080"
+    volumes:
+      - storage:/var/www/html/storage
+    depends_on:
+      pgsql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  pgsql:
+    image: postgres:16-alpine
+    container_name: trypost-staging-pgsql
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trypost_staging
+      POSTGRES_USER: trypost
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env.staging}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U trypost -d trypost_staging']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: trypost-staging-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
+  storage:
